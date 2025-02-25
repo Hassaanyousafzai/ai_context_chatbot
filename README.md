@@ -21,12 +21,12 @@ Clone the repository:
 
 ```sh
 git clone https://github.com/Hassaanyousafzai/ai_context_chatbot.git
-cd resume-roaster
+cd ai_context_chatbot
 ```
 
 ```sh
 python -m venv venv
-source venv/bin/activate  # On Windows, use: venv\Scripts\activate
+source venv/bin/activate
 ```
 
 ```sh
