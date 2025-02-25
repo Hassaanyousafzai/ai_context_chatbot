@@ -3,12 +3,12 @@
 Before running the project, make sure you have the following:
 
 1. **Get Gemini API Key**
-   - Visit Google AI Studio and sign up.
+   - Visit [Google AI Studio](https://aistudio.google.com/) and sign up.
    - Generate an API key for Gemini Pro.
    - Store the API key securely.
 
 2. **Get Qdrant API Key**
-   - Sign up at Qdrant Cloud.
+   - Sign up at [Qdrant Cloud](https://qdrant.tech/).
    - Create a new project.
    - Retrieve your API key from the dashboard.
 
@@ -20,7 +20,7 @@ Before running the project, make sure you have the following:
 Clone the repository:
 
 ```sh
-git clone https://github.com/yourusername/resume-roaster.git
+git clone https://github.com/Hassaanyousafzai/ai_context_chatbot.git
 cd resume-roaster
 ```
 
