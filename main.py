@@ -1,27 +1,29 @@
-import google.generativeai as genai
-from sentence_transformers import SentenceTransformer
 import os
-from qdrant_client import QdrantClient
-from qdrant_client.http.models import VectorParams, Distance
-from qdrant_client.http.models import PointStruct
-from qdrant_client.http import models
-import datetime
-import uuid
 import re
-from dotenv import load_dotenv
+import uuid
 import time
+import datetime
+import logging
 import functools
+from dotenv import load_dotenv
 from nltk.corpus import stopwords
 import nltk
+from sentence_transformers import SentenceTransformer
+from qdrant_client import QdrantClient
+from qdrant_client.http import models
+from qdrant_client.http.models import PointStruct
+import google.generativeai as genai
 
-# Download NLTK stopwords if not already present
-try:
-    nltk.data.find('corpora/stopwords')
-except LookupError:
-    nltk.download('stopwords')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
-
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -31,10 +33,9 @@ qdrant_client = QdrantClient(
     api_key=QDRANT_API_KEY,
 )
 
-# Define collection parameters
 collection_name = "chat_history"
-vector_size = 384  # Dimensionality of the embedding model's output
-distance_metric = models.Distance.COSINE  # Using proper enum value
+vector_size = 384
+distance_metric = models.Distance.COSINE
 
 # Check if the collection exists
 try:
@@ -62,6 +63,11 @@ embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 context_cache = {}
 MAX_CACHE_SIZE = 100
 
+try:
+    nltk.data.find('corpora/stopwords')
+except LookupError:
+    nltk.download('stopwords')
+
 def format_timestamp(timestamp_str):
     """Format ISO timestamp to a more human-readable format"""
     try:
@@ -77,11 +83,9 @@ def cache_result(func):
         # Create a simple cache key from arguments
         cache_key = f"{func.__name__}:{str(args)}:{str(kwargs)}"
         
-        # Check if result is in cache
         if cache_key in context_cache:
             return context_cache[cache_key]
         
-        # If not, compute the result
         result = func(*args, **kwargs)
         
         # Store in cache (with simple LRU implementation)
@@ -97,7 +101,6 @@ def cache_result(func):
 def store_user_message(user_message, user_id):
     """Store user message with embedding in Qdrant"""
     try:
-        # Generate embedding for the user message
         user_embedding = embedding_model.encode(user_message).tolist()
         
         # Create a unique ID for the message
@@ -130,7 +133,6 @@ def store_user_message(user_message, user_id):
 def retrieve_context(user_message, user_id, top_k=5):
     """Retrieve relevant context based on semantic similarity"""
     try:
-        # Generate embedding for the current user message
         query_embedding = embedding_model.encode(user_message).tolist()
         
         # Search for similar messages in the collection
@@ -152,6 +154,7 @@ def retrieve_context(user_message, user_id, top_k=5):
         context = [
             (hit.payload["message"], hit.payload["timestamp"], hit.score)
             for hit in search_result
+            if hit.score > 0.4
         ]
         
         return context
@@ -198,7 +201,6 @@ def retrieve_topic_history(topic_keywords, user_id, top_k=5):
 
 def extract_topics(user_message):
     """Extract potential topics from user message for targeted retrieval with improved NLP"""
-    # Use NLTK's stopwords for better filtering
     stop_words = set(stopwords.words('english'))
     
     # Convert to lowercase and tokenize by non-alphanumeric chars
@@ -207,20 +209,16 @@ def extract_topics(user_message):
     # Filter out stop words and short words
     topics = [word for word in words if word not in stop_words and len(word) > 2]
     
-    # Extract key phrases (simple approach - can be enhanced with NLP techniques)
     phrases = []
-    if len(user_message.split()) >= 3:  # Only try to extract phrases from longer messages
-        # Simple noun phrase extraction (consecutive non-stop words)
+    if len(user_message.split()) >= 3:
         words_list = user_message.lower().split()
         for i in range(len(words_list) - 1):
             if words_list[i] not in stop_words and words_list[i+1] not in stop_words:
                 phrases.append(f"{words_list[i]} {words_list[i+1]}")
     
-    # Combine individual topics and phrases
     all_topics = topics + phrases
     
-    # Prioritize topics based on length (longer topics tend to be more specific)
-    return sorted(all_topics, key=len, reverse=True)[:10]  # Limit to top 10
+    return sorted(all_topics, key=len, reverse=True)[:10]
 
 def is_explicit_history_query(user_message):
     """Determine if this is an explicit question about past interactions"""
@@ -228,7 +226,9 @@ def is_explicit_history_query(user_message):
         "when did i", "what time did i", "last time i", 
         "previously i", "earlier i", "remember when i", 
         "did i mention", "have i talked about", "when was the last time i",
-        "do you remember", "have we discussed", "did we talk about"
+        "do you remember", "have we discussed", "did we talk about",
+        "what did i say about", "when did i last mention", "what was my last",
+        "what was i", "did i tell you about"
     ]
     
     lower_message = user_message.lower()
@@ -247,51 +247,43 @@ def is_followup_question(message):
     
     # Check if message is short (typical of follow-ups)
     is_short = len(message.split()) < 6
-    
-    # Check if message starts with common follow-up phrases
+
     lower_message = message.lower()
     has_indicator = any(indicator in lower_message for indicator in followup_indicators)
-    
-    # Additional check for question marks with short questions
+ 
     has_question_mark = "?" in message and is_short
     
     return is_short or has_indicator or has_question_mark
 
 def chat_with_gemini(user_message, user_id, recent_conversation=None):
     """Generate contextual response using GEMINI and retrieved context"""
-    # Initialize recent conversation tracking if not provided
     if recent_conversation is None:
         recent_conversation = []
     
     try:
         # Store the current user message
         message_id = store_user_message(user_message, user_id)
+        logger.info(f"Stored message with ID: {message_id}")
         
-        # Extract potential topics from the message
         topics = extract_topics(user_message)
-        
-        # Check if this is an explicit history query
+
         is_history_query = is_explicit_history_query(user_message)
         
-        # Determine if this is a follow-up question
         is_followup = is_followup_question(user_message)
         
-        # If asking about history, retrieve topic-specific context
         if is_history_query and topics:
+            logger.info(f"History query detected with topics: {topics}")
             context = retrieve_topic_history(topics, user_id, top_k=5)
         else:
             # Otherwise get general context
             context = retrieve_context(user_message, user_id)
         
-        # Format the historical context
         formatted_historical_context = ""
         if context:
             formatted_historical_context = "Previous relevant conversations:\n"
             for idx, (msg, ts, score) in enumerate(context, 1):
                 readable_ts = format_timestamp(ts)
-                # Only include context with reasonable relevance
-                if score > 0.5:  # Filter low relevance matches
-                    formatted_historical_context += f"{idx}. User said: \"{msg}\" (on {readable_ts}, relevance: {score:.2f})\n"
+                formatted_historical_context += f"{idx}. User said: \"{msg}\" (on {readable_ts}, relevance: {score:.2f})\n"
         else:
             formatted_historical_context = "No relevant historical context found."
         
@@ -304,17 +296,15 @@ def chat_with_gemini(user_message, user_id, recent_conversation=None):
         
         # Combine both contexts
         combined_context = formatted_historical_context + current_conversation_context
+        logger.info("Context preparation complete")
         
-        # Prepare system instructions with context
         system_instruction = create_system_instruction(combined_context, is_history_query, not bool(context))
         
-        # Configure the model with updated system instruction
         model = genai.GenerativeModel(
             'gemini-1.5-flash',
             system_instruction=system_instruction
         )
         
-        # Generate response from the Gemini model
         generation_config = {
             "temperature": 0.7,
             "top_p": 0.95,
@@ -328,19 +318,18 @@ def chat_with_gemini(user_message, user_id, recent_conversation=None):
         )
         
         response_text = response.text
+        logger.info("Generated response successfully")
         
-        # Update recent conversation with this exchange
         recent_conversation.append(("User", user_message))
         recent_conversation.append(("Assistant", response_text))
         
-        # Keep only the last 10 exchanges to maintain relevant context
         if len(recent_conversation) > 10:
             recent_conversation = recent_conversation[-10:]
         
         return response_text, recent_conversation
         
     except Exception as e:
-        print(f"Error generating response: {str(e)}")
+        logger.error(f"Error generating response: {str(e)}", exc_info=True)
         error_response = "I apologize, but I'm having trouble generating a response. Please try again."
         if recent_conversation is not None:
             recent_conversation.append(("User", user_message))
@@ -350,12 +339,10 @@ def chat_with_gemini(user_message, user_id, recent_conversation=None):
 def create_system_instruction(context, is_history_query=False, no_context=False):
     """Create system instruction with embedded context and additional handling"""
     
-    # Base instruction
     base_instruction = """
     You are a helpful assistant who is an expert at conversing with the user about their day-to-day life and activities.
     """
     
-    # Add context section
     context_section = f"""
     The following is relevant context from past conversations with this user:
     {context}
@@ -365,32 +352,29 @@ def create_system_instruction(context, is_history_query=False, no_context=False)
     guidelines = """
     Guidelines for your responses:
     1. Only explicitly reference past conversations when directly asked about them (e.g., "Did I mention X?", "When did I talk about Y?").
-    2. When specifically asked about past events, include the exact date and time from the context.
+    2. When specifically asked about past events, include the exact date and time from the context like "Last time you mentioned [topic] was on [date] at [time]."
     3. MAINTAIN CONVERSATIONAL CONTEXT from the current conversation thread. If the user mentions something like "I played football and it was amazing" and later asks "how was the football game?", remember the details they shared about it being amazing.
     4. If the user asks a follow-up question like "and how was it?" or "how was the game?", connect it to the most recently discussed topic rather than asking for clarification.
-    5. Be conversational and natural while providing accurate information.
+    5. For questions like "What did I say about my plans?" or "What was my last project about?", respond with the exact information the user shared, e.g., "You said you plan to visit the park tomorrow."
     6. Track the current conversation's topic flow to handle ambiguous follow-up questions intelligently.
     7. Never invent or hallucinate details that aren't explicitly in the context or the current conversation.
     8. When the user asks about details of something they mentioned earlier in the CURRENT conversation, use that information without prompting them to repeat it.
     """
     
-    # Add specific guidance based on query type and context availability
     if is_history_query and no_context:
         guidelines += """
-        9. Since this appears to be a question about past conversations but no relevant context was found, politely inform the user that you don't have any record of them mentioning that specific topic. For example: "I don't recall you mentioning that in our previous conversations. Would you like to tell me about it now?"
+        9. Since this appears to be a question about past conversations but no relevant context was found, clearly inform the user: "I don't have any record of you mentioning [topic]."
         """
     elif no_context:
         guidelines += """
         9. Though no specific historical context was found, focus on maintaining the flow of the current conversation.
         """
     
-    # Combine all sections
     return base_instruction + context_section + guidelines
 
-# Example interaction
 if __name__ == "__main__":
     user_id = "123"
-    recent_conversation = []  # Initialize conversation tracking
+    recent_conversation = []
     print("Start chatting with the assistant (type 'exit' to stop):")
     
     try:
@@ -399,12 +383,11 @@ if __name__ == "__main__":
             if user_input.lower() == 'exit':
                 break
                 
-            # Track response time for performance monitoring
             start_time = time.time()
             bot_response, recent_conversation = chat_with_gemini(user_input, user_id, recent_conversation)
             elapsed_time = time.time() - start_time
             
-            print(f"Assistant: {bot_response}")
+            print(f"\nAssistant: {bot_response}")
             print(f"[Response time: {elapsed_time:.2f}s]")
     except KeyboardInterrupt:
         print("\nExiting chatbot...")

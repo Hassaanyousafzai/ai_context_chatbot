@@ -1,0 +1,6 @@
+python-dotenv
+nltk
+sentence-transformers
+qdrant-client
+google-generativeai
+streamlit
