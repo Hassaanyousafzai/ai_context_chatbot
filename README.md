@@ -13,7 +13,7 @@ Before running the project, make sure you have the following:
    - Retrieve your API key from the dashboard.
 
 3. **Get Qdrant URL**
-   - Once your Qdrant project is set up, get the Qdrant URL from your instance details.
+   - Once your Qdrant project is set up, get the Qdrant URL (endpoint) from your instance details.
 
 # Installation
 
