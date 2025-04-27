@@ -57,5 +57,7 @@ streamlit run frontend.py
 - streamlit
 
 **Gemini AI**
+
 **Qdrant (for vector database storage)**
+
 **sentence-transformers**
